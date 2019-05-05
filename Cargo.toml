@@ -1,0 +1,16 @@
+[package]
+name = "easy_cap"
+version = "0.1.0"
+authors = ["kirohy <hiroki.ysok.nye@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+chrono = "^0.4"
+dirs = "^1.0"
+gtk = "0.6.0"
+gdk = "0.10.0"
+gdk-pixbuf = "0.6.0"
+relm = "^0.16.0"
+relm-derive = "^0.16.0"
+relm-attributes = "^0.16.0"
+rscam = "^0.5.4"
