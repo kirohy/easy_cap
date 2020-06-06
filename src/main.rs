@@ -1,40 +1,41 @@
-#[macro_use]
-extern crate relm;
-#[macro_use]
-extern crate relm_derive;
-
 use self::Msg::*;
 use chrono::Local;
 use dirs::home_dir;
-use gdk_pixbuf::{Pixbuf, PixbufLoader, PixbufLoaderExt};
+use easy_cap::filters;
+use gdk_pixbuf::{PixbufLoader, PixbufLoaderExt};
 use gtk::Orientation::Horizontal;
 use gtk::Orientation::Vertical;
-use gtk::{ButtonExt, GtkWindowExt, ImageExt, Inhibit, LabelExt, OrientableExt, WidgetExt};
-use rayon::prelude::*;
+use gtk::{
+    ButtonExt, EditableSignals, EntryExt, GtkWindowExt, ImageExt, Inhibit, LabelExt, OrientableExt,
+    WidgetExt,
+};
 use relm::{interval, Relm, Widget};
-use relm_attributes::widget;
+use relm_derive::{widget, Msg};
 use rscam::{Camera, Config};
 use std::path::PathBuf;
 use std::process::Command;
+
+#[derive(Copy, Clone, PartialEq)]
+pub enum FilterType {
+    Normal,
+    Gray,
+    Reverse,
+    Particle,
+}
 
 pub struct Model {
     camera_found: bool,
     camera_device: &'static str,
     camera_status: Option<Camera>,
     camera_button_label: String,
-    filter: Filters,
-}
-
-pub enum Filters {
-    Normal,
-    Gray,
-    Reverse,
+    filter: FilterType,
+    filter_prev: FilterType,
+    particles: filters::ParamsForParticle,
+    target_rgb: filters::Rgb,
 }
 
 #[derive(Msg)]
 pub enum Msg {
-    ScreenShotFull,
-    ScreenShotArea,
     ToggleCamera,
     CloseCamera,
     ChangeCamera,
@@ -42,28 +43,12 @@ pub enum Msg {
     ApplyNormal,
     ApplyGray,
     ApplyReverse,
+    ApplyParticle,
+    ChangeRed(String),
+    ChangeGreen(String),
+    ChangeBlue(String),
     Redraw,
     Quit,
-}
-
-fn grayscale(pixbuf: &Pixbuf) {
-    let n_channels = pixbuf.get_n_channels();
-    let buf = unsafe { pixbuf.get_pixels() };
-
-    buf.par_chunks_mut(n_channels as usize).for_each(|slice| {
-        let gray = 0.299 * slice[0] as f32 + 0.587 * slice[1] as f32 + 0.114 * slice[2] as f32;
-        slice[0] = gray as u8;
-        slice[1] = gray as u8;
-        slice[2] = gray as u8;
-    });
-}
-
-fn reverse_rgb(pixbuf: &Pixbuf) {
-    let buf = unsafe { pixbuf.get_pixels() };
-
-    buf.par_chunks_mut(1).for_each(|x| {
-        x[0] = 255 - x[0];
-    })
 }
 
 #[widget]
@@ -74,28 +59,19 @@ impl Widget for Win {
             camera_device: "/dev/video0",
             camera_status: None,
             camera_button_label: String::from("Start Camera"),
-            filter: Filters::Normal,
+            filter: FilterType::Normal,
+            filter_prev: FilterType::Normal,
+            particles: filters::ParamsForParticle::new(
+                (640, 360),
+                10000,
+                filters::Rgb::new(0, 0, 0),
+            ),
+            target_rgb: filters::Rgb::new(0, 0, 0),
         }
     }
 
     fn update(&mut self, event: Msg) {
         match event {
-            ScreenShotFull => {
-                Command::new("sh")
-                    .arg("-c")
-                    .arg("gnome-screenshot")
-                    .spawn()
-                    .expect("Failed to capture the screen.");
-            }
-
-            ScreenShotArea => {
-                Command::new("sh")
-                    .arg("-c")
-                    .arg("gnome-screenshot --area")
-                    .spawn()
-                    .expect("Failed to capture the screen.");
-            }
-
             ToggleCamera => {
                 self.toggle_camera();
                 match self.model.camera_status {
@@ -121,11 +97,37 @@ impl Widget for Win {
 
             CapturePixbuf => self.capture_pixbuf(),
 
-            ApplyNormal => self.model.filter = Filters::Normal,
+            ApplyNormal => self.model.filter = FilterType::Normal,
 
-            ApplyGray => self.model.filter = Filters::Gray,
+            ApplyGray => self.model.filter = FilterType::Gray,
 
-            ApplyReverse => self.model.filter = Filters::Reverse,
+            ApplyReverse => self.model.filter = FilterType::Reverse,
+
+            ApplyParticle => self.model.filter = FilterType::Particle,
+
+            ChangeRed(red_string) => {
+                let red = red_string.parse::<u8>();
+                if let Ok(v) = red {
+                    self.model.particles.target_rgb.red = v;
+                    self.model.target_rgb.red = v;
+                }
+            }
+
+            ChangeGreen(green_string) => {
+                let green = green_string.parse::<u8>();
+                if let Ok(v) = green {
+                    self.model.particles.target_rgb.green = v;
+                    self.model.target_rgb.green = v;
+                }
+            }
+
+            ChangeBlue(blue_string) => {
+                let blue = blue_string.parse::<u8>();
+                if let Ok(v) = blue {
+                    self.model.particles.target_rgb.blue = v;
+                    self.model.target_rgb.blue = v;
+                }
+            }
 
             Redraw => self.update_camera(),
 
@@ -139,29 +141,12 @@ impl Widget for Win {
 
     view! {
         gtk::Window {
-            title: "Image Utils",
+            title: "Easy Capture",
             gtk::Box {
                 orientation: Horizontal,
 
                 gtk::Box {
                     orientation: Vertical,
-
-                    #[name="screen_label"]
-                    gtk::Label {
-                        text: "Screen Utils",
-                    },
-
-                    #[name="screenshot_full"]
-                    gtk::Button {
-                        clicked => ScreenShotFull,
-                        label: "Screenshot(Full)"
-                    },
-
-                    #[name="screenshot_area"]
-                    gtk::Button {
-                        clicked => ScreenShotArea,
-                        label: "Screenshot(Area)"
-                    },
 
                     #[name="camera_label"]
                     gtk::Label {
@@ -214,6 +199,39 @@ impl Widget for Win {
                         clicked => ApplyReverse,
                         label: "Apply ReverseRGB",
                     },
+
+                    #[name="button_to_particle"]
+                    gtk::Button {
+                        clicked => ApplyParticle,
+                        label: "Apply ParticleFilter",
+                    },
+
+                    #[name="target_red"]
+                    gtk::Entry {
+                        changed(entry) => {
+                            let red_string = entry.get_text().expect("failed to parse").to_string();
+                            ChangeRed(red_string)
+                        },
+                        placeholder_text: Some("Enter Red value"),
+                    },
+
+                    #[name="target_green"]
+                    gtk::Entry {
+                        changed(entry) => {
+                            let green_string = entry.get_text().expect("failed to parse").to_string();
+                            ChangeGreen(green_string)
+                        },
+                        placeholder_text: Some("Enter Green value"),
+                    },
+
+                    #[name="target_blue"]
+                    gtk::Entry {
+                        changed(entry) => {
+                            let blue_string = entry.get_text().expect("failed to parse").to_string();
+                            ChangeBlue(blue_string)
+                        },
+                        placeholder_text: Some("Enter blue value"),
+                    },
                 },
 
                 gtk::Box {
@@ -226,6 +244,12 @@ impl Widget for Win {
 
                     #[name="image"]
                     gtk::Image {
+                    },
+
+                    #[name="quit_button"]
+                    gtk::Button {
+                        clicked => Quit,
+                        label: "Quit",
                     },
                 },
             },
@@ -283,13 +307,28 @@ impl Win {
                         Ok(_) => {
                             let pixbuf = loader.get_pixbuf().unwrap();
 
+                            if self.model.filter == FilterType::Particle
+                                && self.model.filter_prev != FilterType::Particle
+                            {
+                                self.model.particles = filters::ParamsForParticle::new(
+                                    (640, 360),
+                                    10000,
+                                    self.model.target_rgb,
+                                );
+                            }
+
                             match self.model.filter {
-                                Filters::Gray => grayscale(&pixbuf),
-                                Filters::Reverse => reverse_rgb(&pixbuf),
+                                FilterType::Gray => filters::grayscale(&pixbuf),
+                                FilterType::Reverse => filters::reverse_rgb(&pixbuf),
+                                FilterType::Particle => {
+                                    filters::particle(&pixbuf, &mut self.model.particles)
+                                }
                                 _ => (),
                             }
 
-                            image.set_from_pixbuf(&pixbuf);
+                            image.set_from_pixbuf(Some(&pixbuf));
+                            self.model.filter_prev = self.model.filter;
+
                             while gtk::events_pending() {
                                 gtk::main_iteration_do(true);
                             }
@@ -312,13 +351,13 @@ impl Win {
 
         let device_out = out.stdout;
         let device_str = std::str::from_utf8(&device_out).unwrap();
-        if device_str == "3" {
+        if device_str != "2" {
             if self.model.camera_device == "/dev/video0" {
-                self.stop_camera();
-                self.model.camera_device = "/dev/video1";
+                self.close_camera();
+                self.model.camera_device = "/dev/video2";
                 self.open_camera();
             } else {
-                self.stop_camera();
+                self.close_camera();
                 self.model.camera_device = "/dev/video0";
                 self.open_camera();
             }
